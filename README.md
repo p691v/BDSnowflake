@@ -29,3 +29,110 @@
 2. Файл docker-compose.yml с установкой PostgreSQL и заполненными данными из файлов mock_data(*).csv.
 3. Скрипты DDL (SQL) создания таблиц фактов и измерений в соответствии с моделью снежинка/звезда.
 4. Скрипты DML (SQL) заполнения таблиц фактов и измерений из исходных данных.
+
+## Реализация лабораторной работы
+
+В репозитории добавлена воспроизводимая реализация на PostgreSQL:
+
+- `docker-compose.yml` - поднимает PostgreSQL 16 и автоматически выполняет SQL-скрипты из каталога `sql`.
+- `sql/01_load_staging.sql` - создает staging-таблицу `public.mock_data` и загружает все 10 CSV-файлов из каталога `исходные данные`.
+- `sql/02_create_snowflake_model.sql` - DDL-скрипт создания схемы `mart` со снежинкой и фактовой таблицей.
+- `sql/03_populate_snowflake_model.sql` - DML-скрипт заполнения измерений и фактов из `public.mock_data`.
+- `sql/04_quality_checks.sql` - проверочные представления и примеры аналитических витрин.
+
+### Запуск
+
+```bash
+docker compose up -d
+```
+
+Подключение из DBeaver:
+
+- Host: `localhost`
+- Port: `5432`
+- Database: `bd_snowflake`
+- User: `bd_user`
+- Password: `bd_password`
+
+Если нужно полностью пересоздать базу и заново выполнить init-скрипты:
+
+```bash
+docker compose down -v
+docker compose up -d
+```
+
+### Модель данных
+
+Исходные файлы имеют повторяющиеся значения `id`, `sale_customer_id`, `sale_seller_id`, `sale_product_id` в каждом CSV-файле. Поэтому в staging сохраняется `source_file`, а натуральные ключи строятся как `source_file || ':' || id`. Это предотвращает конфликт ключей и позволяет получить ровно 10 000 строк фактов.
+
+Таблица фактов:
+
+- `mart.fact_sales` - факт продажи: дата, покупатель, продавец, магазин, товар, количество, сумма продажи, исходная цена товара.
+
+Основные измерения:
+
+- `mart.dim_customer` - покупатель и его питомец.
+- `mart.dim_seller` - продавец.
+- `mart.dim_store` - магазин.
+- `mart.dim_supplier` - поставщик.
+- `mart.dim_product` - товар.
+- `mart.dim_date` - календарное измерение для дат продажи, выпуска и срока годности товара.
+
+Нормализованные справочники снежинки:
+
+- География: `mart.dim_country`, `mart.dim_city`.
+- Питомцы: `mart.dim_pet_type`, `mart.dim_pet_breed`, `mart.dim_pet_category`.
+- Товары: `mart.dim_product_category`, `mart.dim_product_brand`, `mart.dim_product_material`, `mart.dim_product_color`, `mart.dim_product_size`.
+
+### Проверочные запросы
+
+Проверка количества строк:
+
+```sql
+SELECT *
+FROM mart.v_row_count_check
+ORDER BY object_name;
+```
+
+Ожидаемый результат после загрузки:
+
+| object_name | row_count |
+| --- | ---: |
+| dim_customer | 10000 |
+| dim_product | 10000 |
+| dim_seller | 10000 |
+| dim_store | 10000 |
+| dim_supplier | 10000 |
+| fact_sales | 10000 |
+| source_mock_data | 10000 |
+
+Проверка целостности фактов:
+
+```sql
+SELECT *
+FROM mart.v_fact_integrity_check;
+```
+
+Ожидаемые ключевые показатели:
+
+- `fact_rows = 10000`
+- `distinct_source_sales = 10000`
+- `missing_customer_fk = 0`
+- `missing_seller_fk = 0`
+- `missing_product_fk = 0`
+- `missing_store_fk = 0`
+
+Пример аналитического запроса:
+
+```sql
+SELECT product_category_name, sales_count, items_sold, revenue
+FROM mart.v_sales_by_product_category;
+```
+
+Результат на текущих исходных данных:
+
+| product_category_name | sales_count | items_sold | revenue |
+| --- | ---: | ---: | ---: |
+| Toy | 3406 | 18635 | 868101.63 |
+| Cage | 3327 | 18057 | 831117.94 |
+| Food | 3267 | 17931 | 830632.55 |
